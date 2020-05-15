@@ -144,7 +144,7 @@ int main(int argc, char **argv) {
     struct bpf_program fp;
 
     if (argc != 2) {
-        fprintf(stderr, "Bad arguments. Expected %s 'filter command'\n", argv[0]);
+        fprintf(stderr, "Bad arguments. Expected %s [filter command]\n", argv[0]);
         return EXIT_FAILURE;
     }
 
