@@ -179,6 +179,7 @@ int main(int argc, char **argv) {
 
     // We wait for ^C to break us out of loop above.
     pcap_close(descr);
+    pcap_freecode(&fp);
 
     while (head->next != NULL) {
         listitem = head->next;
