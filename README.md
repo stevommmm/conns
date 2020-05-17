@@ -6,9 +6,15 @@ Essentially a less awkward `tcpdump | awk | sort | uniq`.
 
 ```
 Usage:
-  conns [filter command]
+  conns [-r] [filter command]
 ```
+
+`-r` enables name resolution of IPs on collection
+
+`filter command` is currently required to be a single string
+
 
 to-do:
 
 * move to new dns resolution funcs
+* concat all unparsed args into the pcap filter string
