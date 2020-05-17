@@ -147,7 +147,7 @@ int main(int argc, char **argv) {
     ListAddr *listitem;
 
     char errbuf[PCAP_ERRBUF_SIZE];
-    struct bpf_program *fp = NULL;
+    struct bpf_program fp;
     int opt;
 
     app = malloc(sizeof(App));
@@ -164,30 +164,33 @@ int main(int argc, char **argv) {
         }
     }
 
-    // If an optional filter was supplied compile and load it
-    if (optind < argc) {
-        fprintf(stderr, "Running with no filter, will get everything.\n");
-        // Compile the filter expression
-        if(pcap_compile(descr, fp, argv[optind + 1], 0, PCAP_NETMASK_UNKNOWN) == -1) {
-            fprintf(stderr, "\npcap_compile() failed\n");
-            free(app);
-            return EXIT_FAILURE;
-        }
-
-        // Set the filter compiled above
-        if(pcap_setfilter(descr, fp) == -1) {
-            fprintf(stderr, "\npcap_setfilter() failed\n");
-            free(app);
-            return EXIT_FAILURE;
-        }
-    }
-
     // Now, open device for sniffing
     descr = pcap_open_live("any", BUFSIZ, 0, 1000, errbuf);
     if(descr == NULL) {
         fprintf(stderr, "pcap_open_live() failed due to [%s]\n", errbuf);
         free(app);
         return EXIT_FAILURE;
+    }
+
+    // If an optional filter was supplied compile and load it
+    if (optind < argc) {
+        // Compile the filter expression
+        if(pcap_compile(descr, &fp, argv[optind + 1], 0, PCAP_NETMASK_UNKNOWN) == -1) {
+            fprintf(stderr, "\npcap_compile() failed\n");
+            pcap_close(descr);
+            free(app);
+            return EXIT_FAILURE;
+        }
+
+        // Set the filter compiled above
+        if(pcap_setfilter(descr, &fp) == -1) {
+            fprintf(stderr, "\npcap_setfilter() failed\n");
+            pcap_close(descr);
+            free(app);
+            return EXIT_FAILURE;
+        }
+    } else {
+        fprintf(stderr, "Running with no filter, will get everything.\n");
     }
 
     signal(SIGINT, intHandler);
@@ -199,8 +202,8 @@ int main(int argc, char **argv) {
 
     // We wait for ^C to break us out of loop above.
     pcap_close(descr);
-    if (fp != NULL)
-        pcap_freecode(fp);
+    if (fp.bf_len > 0)
+        pcap_freecode(&fp);
 
     while (app->next != NULL) {
         listitem = app->next;
