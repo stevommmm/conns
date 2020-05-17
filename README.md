@@ -11,5 +11,4 @@ Usage:
 
 to-do:
 
-* Proper arg parser
-* Toggle name resolution
+* move to new dns resolution funcs

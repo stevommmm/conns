@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <pthread.h>
+#include <unistd.h>
 #include <net/ethernet.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
@@ -22,12 +23,15 @@ void intHandler(int dummy) {
 }
 
 
-void resolve_ip(uint32_t addr, char *hostname){
+void format_ip(uint32_t addr, char *hostname, bool resolve) {
     struct hostent *hent;
     struct in_addr ip_addr;
     ip_addr.s_addr = addr;
 
     sprintf(hostname, "%s", inet_ntoa(ip_addr));
+
+    if (!resolve)
+        return;
 
     hent = gethostbyaddr((char *)&(ip_addr.s_addr), sizeof(ip_addr.s_addr), AF_INET);
     if(hent != NULL) {
@@ -43,24 +47,25 @@ typedef struct ListAddr {
 } ListAddr;
 
 
-typedef struct ListAddrHead {
+typedef struct App {
     struct ListAddr *next;
-} ListAddrHead;
+    bool resolve;
+} App;
 
 
 /** Append an IP to the end of our list, checking for duplicates and
  *  printing the IP if it's a new addition.
  *
- *  \param[in]  head      List head to start from
+ *  \param[in]  app       List head to start from
  *  \param[in]  addr      IP address to be appended
  *  \param[in]  internal  Marker for preloaded host IPs
  */
-void list_uniq_append(ListAddrHead *head, uint32_t addr, bool internal) {
-    ListAddr *i = head->next;
+void list_uniq_append(App *app, uint32_t addr, bool internal) {
+    ListAddr *i = app->next;
     ListAddr *item;
 
-    if (head->next == NULL) {
-        i = (ListAddr *) head;
+    if (app->next == NULL) {
+        i = (ListAddr *) app;
         goto alloc;
     }
 
@@ -82,7 +87,7 @@ alloc:
 
     if (!internal) {
         char hostname[1024];
-        resolve_ip(addr, hostname);
+        format_ip(addr, hostname, app->resolve);
         printf("%s\n", hostname);
     }
 
@@ -93,9 +98,9 @@ alloc:
 /** Iterate all the interfaces Pcap knows about and insert the IPs to our list
  *  so we can skip over them when we begin adding remote connections.
  *
- *  \param[in]  head      List head to start from
+ *  \param[in]  app      List head to start from
  */
-void prepopulate_addrs(ListAddrHead *head) {
+void prepopulate_addrs(App *app) {
     pcap_if_t *alldevs;
     char errbuf[PCAP_ERRBUF_SIZE];
 
@@ -106,7 +111,7 @@ void prepopulate_addrs(ListAddrHead *head) {
     for(pcap_if_t *d = alldevs; d != NULL; d = d->next) {
         for(pcap_addr_t *a = d->addresses; a != NULL; a = a->next) {
             if(a->addr->sa_family == AF_INET) {
-                list_uniq_append(head, ((struct sockaddr_in*)a->addr)->sin_addr.s_addr, true);
+                list_uniq_append(app, ((struct sockaddr_in*)a->addr)->sin_addr.s_addr, true);
             }
         }
     }
@@ -117,75 +122,91 @@ void prepopulate_addrs(ListAddrHead *head) {
 /** Iterate all the interfaces Pcap knows about and insert the IPs to our list
  *  so we can skip over them when we begin adding remote connections.
  *
- *  \param[in]  user  Pointer to a cast ListAddrHead where we'll stick any IPs
+ *  \param[in]  user  Pointer to a cast App where we'll stick any IPs
  *                    we get notified about.
  */
 void callback(u_char *user, const struct pcap_pkthdr *pkthdr, const u_char *packet) {
     const struct ether_header *eh;
     const struct iphdr *iph;
-    ListAddrHead *head = (ListAddrHead *) user;
+    App *app = (App *) user;
 
     eh = (struct ether_header *) packet;
     iph = (struct iphdr *)(packet += 16 /* COOKED SOCK LEN */);
 
     if (ntohs(eh->ether_type) == ETHERTYPE_IP) {
         if (iph->protocol == IPPROTO_TCP || iph->protocol == IPPROTO_UDP) {
-            list_uniq_append(head, iph->saddr, false);
-            list_uniq_append(head, iph->daddr, false);
+            list_uniq_append(app, iph->saddr, false);
+            list_uniq_append(app, iph->daddr, false);
         }
     }
 }
 
+
 int main(int argc, char **argv) {
-    ListAddrHead *head;
+    App *app;
     ListAddr *listitem;
 
     char errbuf[PCAP_ERRBUF_SIZE];
-    struct bpf_program fp;
+    struct bpf_program *fp = NULL;
+    int opt;
 
-    if (argc != 2) {
-        fprintf(stderr, "Bad arguments. Expected %s [filter command]\n", argv[0]);
-        return EXIT_FAILURE;
+    app = malloc(sizeof(App));
+    app->next = NULL;
+    app->resolve = false;
+
+    while ((opt = getopt(argc, argv, "r")) != -1) {
+        switch (opt) {
+        case 'r': app->resolve = true; break;
+        default:
+            fprintf(stderr, "Usage: %s [-r] [filter]\n", argv[0]);
+            free(app);
+            return EXIT_FAILURE;
+        }
+    }
+
+    // If an optional filter was supplied compile and load it
+    if (optind < argc) {
+        fprintf(stderr, "Running with no filter, will get everything.\n");
+        // Compile the filter expression
+        if(pcap_compile(descr, fp, argv[optind + 1], 0, PCAP_NETMASK_UNKNOWN) == -1) {
+            fprintf(stderr, "\npcap_compile() failed\n");
+            free(app);
+            return EXIT_FAILURE;
+        }
+
+        // Set the filter compiled above
+        if(pcap_setfilter(descr, fp) == -1) {
+            fprintf(stderr, "\npcap_setfilter() failed\n");
+            free(app);
+            return EXIT_FAILURE;
+        }
     }
 
     // Now, open device for sniffing
     descr = pcap_open_live("any", BUFSIZ, 0, 1000, errbuf);
     if(descr == NULL) {
         fprintf(stderr, "pcap_open_live() failed due to [%s]\n", errbuf);
-        return EXIT_FAILURE;
-    }
-
-    // Compile the filter expression
-    if(pcap_compile(descr, &fp, argv[1], 0, PCAP_NETMASK_UNKNOWN) == -1) {
-        fprintf(stderr, "\npcap_compile() failed\n");
-        return EXIT_FAILURE;
-    }
-
-    // Set the filter compiled above
-    if(pcap_setfilter(descr, &fp) == -1) {
-        fprintf(stderr, "\npcap_setfilter() failed\n");
+        free(app);
         return EXIT_FAILURE;
     }
 
     signal(SIGINT, intHandler);
 
-    head = malloc(sizeof(ListAddrHead));
-    head->next = NULL;
-
-    prepopulate_addrs(head);
+    prepopulate_addrs(app);
 
     // Enter into the callback loop, casting and passing our list head
-    pcap_loop(descr, -1, callback, (u_char*)head);
+    pcap_loop(descr, -1, callback, (u_char*)app);
 
     // We wait for ^C to break us out of loop above.
     pcap_close(descr);
-    pcap_freecode(&fp);
+    if (fp != NULL)
+        pcap_freecode(fp);
 
-    while (head->next != NULL) {
-        listitem = head->next;
-        head->next = listitem->next;
+    while (app->next != NULL) {
+        listitem = app->next;
+        app->next = listitem->next;
         free(listitem);
     }
-    free(head);
+    free(app);
     return EXIT_SUCCESS;
 }
